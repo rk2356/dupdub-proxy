@@ -4,6 +4,30 @@ function hasHindi(text) {
   return /[\u0900-\u097F]/.test(text);
 }
 
+// Hardcoded speaker IDs for guaranteed correct voice matching
+const SPEAKER_MAP = {
+  'spoongy': 'uranus||||c2d38855d8f15bedd8d3881fd6d85647',
+    'sunshine blondie': null, // Will be resolved via search
+  'adam': 'uranus_Adam',
+  'panda warrior': 'uranus||||054c58511d158071e0b4983d68894bd5',
+  'kung master': null // Will be resolved via search
+};
+
+async function callTTS(headers, payload) {
+  const r = await fetch('https://moyin-gateway.dupdub.com/tts/v1/playDemo/dubForSpeaker', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload)
+  });
+  const contentType = r.headers.get('content-type') || '';
+  if (contentType.includes('audio')) {
+    const buffer = await r.buffer();
+    return { type: 'audio', buffer, contentType };
+  }
+  const data = await r.json();
+  return { type: 'json', data };
+}
+
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
@@ -31,9 +55,14 @@ module.exports = async (req, res) => {
     const speakerName = (speaker || '').trim();
     console.log('Speaker from frontend:', speakerName, '| Language:', lang);
 
-    // Resolve speaker using broad search with exact name matching
-    let speakerId = null;
-    if (speakerName) {
+    // Step 1: Check hardcoded map first
+    let speakerId = SPEAKER_MAP[speakerName.toLowerCase()] || null;
+    if (speakerId) {
+      console.log('Using hardcoded speaker ID:', speakerId);
+    }
+
+    // Step 2: If not in map, search DupDub API
+    if (!speakerId && speakerName) {
       try {
         const broadUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=800';
         const broadRes = await fetch(broadUrl, { headers });
@@ -42,19 +71,12 @@ module.exports = async (req, res) => {
         console.log('Broad search results:', totalResults);
 
         if (broadData.data && broadData.data.results && broadData.data.results.length > 0) {
-          // Find exact match by display name (case-insensitive)
           const match = broadData.data.results.find(s =>
             s.name && s.name.toLowerCase() === speakerName.toLowerCase()
           );
           if (match) {
             speakerId = match.speaker;
             console.log('Found exact match:', match.name, '| Full speaker ID:', speakerId);
-          } else {
-            // Log first 5 names to debug
-            broadData.data.results.slice(0, 5).forEach(s => {
-              console.log('  Sample:', s.name, '| speaker:', s.speaker);
-            });
-            console.log('No exact match for:', speakerName);
           }
         }
       } catch (e) {
@@ -62,7 +84,7 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Fallback: get first speaker for the language
+    // Step 3: Fallback to first speaker for language
     if (!speakerId) {
       console.log('No match for "' + speakerName + '". Getting first', lang, 'speaker...');
       try {
@@ -91,52 +113,67 @@ module.exports = async (req, res) => {
     };
     console.log('TTS payload speaker:', speakerId);
 
-    const r = await fetch('https://moyin-gateway.dupdub.com/tts/v1/playDemo/dubForSpeaker', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload)
-    });
+    // Call TTS with retry on failure
+    let result = await callTTS(headers, payload);
 
-    const contentType = r.headers.get('content-type') || '';
-    if (contentType.includes('audio')) {
-      const buffer = await r.buffer();
-      res.setHeader('Content-Type', contentType);
-      return res.status(200).send(buffer);
+    if (result.type === 'audio') {
+      console.log('Direct audio response, size:', result.buffer.length);
+      res.setHeader('Content-Type', result.contentType);
+      return res.status(200).send(result.buffer);
     }
 
-    const data = await r.json();
+    let data = result.data;
     console.log('DupDub response:', JSON.stringify(data).substring(0, 500));
+
+    // Check for DupDub server error (code 3009) and retry once
+    if (data.data && data.data.resList && data.data.resList[0] && !data.data.resList[0].success) {
+      const errCode = data.data.resList[0].code;
+      const errMsg = data.data.resList[0].message;
+      console.log('DupDub TTS error code:', errCode, '| message:', errMsg, '| Retrying...');
+      await new Promise(r => setTimeout(r, 2000));
+      result = await callTTS(headers, payload);
+      if (result.type === 'audio') {
+        console.log('Retry: Direct audio response, size:', result.buffer.length);
+        res.setHeader('Content-Type', result.contentType);
+        return res.status(200).send(result.buffer);
+      }
+      data = result.data;
+      console.log('Retry DupDub response:', JSON.stringify(data).substring(0, 500));
+      // Check if retry also failed
+      if (data.data && data.data.resList && data.data.resList[0] && !data.data.resList[0].success) {
+        return res.status(500).json({ error: 'DupDub server error (code ' + data.data.resList[0].code + '): ' + data.data.resList[0].message });
+      }
+    }
 
     if (data.code && data.code !== 200) {
       return res.status(400).json({ error: 'DupDub error: ' + (data.message || 'Unknown'), code: data.code });
     }
 
-    // Find audio URL
-    function findAudioUrl(obj, depth) {
+    // Find audio URL - ONLY look for ossFile (actual audio), NOT duration_address (JSON metadata)
+    function findOssFile(obj, depth) {
       if (!obj || typeof obj !== 'object' || depth > 5) return null;
-      if (obj.ossFile) return obj.ossFile;
-      if (obj.duration_address) return obj.duration_address;
-      if (obj.audio_url) return obj.audio_url;
+      if (obj.ossFile && typeof obj.ossFile === 'string' && obj.ossFile.includes('.wav')) return obj.ossFile;
+      if (obj.ossFile && typeof obj.ossFile === 'string') return obj.ossFile;
       for (const key of Object.keys(obj)) {
         if (typeof obj[key] === 'object') {
-          const found = findAudioUrl(obj[key], (depth||0)+1);
+          const found = findOssFile(obj[key], (depth||0)+1);
           if (found) return found;
         }
       }
       return null;
     }
 
-    const audioUrl = findAudioUrl(data, 0);
-    console.log('Audio URL:', audioUrl ? audioUrl.substring(0, 80) : 'none');
+    const audioUrl = findOssFile(data, 0);
+    console.log('Audio URL:', audioUrl ? audioUrl.substring(0, 100) : 'none');
 
     if (!audioUrl) {
-      return res.status(500).json({ error: 'No audio in response. Message: ' + (data.message || 'Unknown') });
+      return res.status(500).json({ error: 'No audio in DupDub response', details: JSON.stringify(data).substring(0, 200) });
     }
 
     const audioRes = await fetch(audioUrl);
     const audioCt = audioRes.headers.get('content-type') || 'audio/mpeg';
     const audioBuffer = await audioRes.buffer();
-    console.log('Audio size:', audioBuffer.length);
+    console.log('Audio size:', audioBuffer.length, '| Content-Type:', audioCt);
 
     if (audioBuffer.length < 100) {
       return res.status(500).json({ error: 'Audio too small' });
