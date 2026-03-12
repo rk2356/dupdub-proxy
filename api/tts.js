@@ -22,7 +22,6 @@ module.exports = async (req, res) => {
 
     const headers = { 'dupdub_token': apiKey, 'Content-Type': 'application/json' };
 
-    // Speaker must be in name@style format. If not, use fallback.
     let speakerId = 'mercury_jane@hopeful';
     if (speaker && speaker.includes('@')) {
       speakerId = speaker;
@@ -45,7 +44,6 @@ module.exports = async (req, res) => {
     });
 
     const contentType = r.headers.get('content-type') || '';
-
     if (contentType.includes('audio')) {
       const buffer = await r.buffer();
       res.setHeader('Content-Type', contentType);
@@ -55,7 +53,19 @@ module.exports = async (req, res) => {
     const data = await r.json();
     console.log('DupDub response:', JSON.stringify(data).substring(0, 500));
 
-    // Extract audio URL from DupDub response
+    // Handle DupDub response: { message: "Succeed", result: { duration_address, ossFile, ... } }
+    if (data.message === 'Succeed' && data.result) {
+      const audioUrl = data.result.duration_address || data.result.ossFile || '';
+      if (audioUrl) {
+        return res.status(200).json({
+          audio_url: audioUrl,
+          duration: data.result.lengthOfTime,
+          message: 'success'
+        });
+      }
+    }
+
+    // Also handle { code: 200, data: { resList: [...] } } format
     if (data.code === 200 && data.data && data.data.resList && data.data.resList.length > 0) {
       const result = data.data.resList[0];
       const audioUrl = result.duration_address || result.ossFile || '';
