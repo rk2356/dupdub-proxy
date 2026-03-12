@@ -27,8 +27,32 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: 'text or textList is required' });
     }
 
+    const headers = {
+      'dupdub_token': apiKey,
+      'Content-Type': 'application/json'
+    };
+
+    // Search for speaker ID if not in name@style format
+    let speakerId = speaker || 'mercury_jane@hopeful';
+    if (speakerId && !speakerId.includes('@')) {
+      const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=English&domainId=1&gender=';
+      const searchRes = await fetch(searchUrl, { headers });
+      if (searchRes.ok) {
+        const searchData = await searchRes.json();
+        const speakers = searchData.data || searchData.result || searchData || [];
+        const flatList = Array.isArray(speakers) ? speakers : (speakers.list || speakers.records || []);
+        const found = flatList.find(s => {
+          const name = (s.name || s.speakerName || s.speaker || '').toLowerCase();
+          return name === speakerId.toLowerCase() || name.includes(speakerId.toLowerCase());
+        });
+        if (found) {
+          speakerId = found.speaker || found.speakerId || found.id || speakerId;
+        }
+      }
+    }
+
     const payload = {
-      speaker: speaker || 'mercury_jane@hopeful',
+      speaker: speakerId,
       speed: speed || 1.0,
       pitch: pitch || 0,
       textList: finalTextList,
@@ -37,10 +61,7 @@ module.exports = async (req, res) => {
 
     const r = await fetch('https://moyin-gateway.dupdub.com/tts/v1/playDemo/dubForSpeaker', {
       method: 'POST',
-      headers: {
-        'dupdub_token': apiKey,
-        'Content-Type': 'application/json'
-      },
+      headers,
       body: JSON.stringify(payload)
     });
 
