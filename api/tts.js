@@ -32,19 +32,25 @@ module.exports = async (req, res) => {
 
     console.log('Speaker from frontend:', speakerName, '| Language:', lang);
 
-    // Resolve speaker: search DupDub API by name with large pageSize
+    // Resolve speaker using keyword search for precise matching
     let speakerId = null;
 
     if (speakerName) {
       try {
-        // Search with large pageSize to get ALL voices at once
-        const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=800';
+        // Use keyword parameter to search for the exact speaker name
+        const encodedName = encodeURIComponent(speakerName);
+        const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?keyword=' + encodedName + '&pageSize=20';
         const searchRes = await fetch(searchUrl, { headers });
         const searchData = await searchRes.json();
 
-        console.log('Search response code:', searchData.code, 'results count:', searchData.data && searchData.data.results ? searchData.data.results.length : 0);
+        console.log('Keyword search for:', speakerName, '| Results:', searchData.data && searchData.data.results ? searchData.data.results.length : 0);
 
         if (searchData.data && searchData.data.results && searchData.data.results.length > 0) {
+          // Log all results to debug
+          searchData.data.results.forEach(s => {
+            console.log('  Result:', s.name, '| speaker:', s.speaker ? s.speaker.substring(0, 40) : 'none');
+          });
+
           // Find exact match by display name (case-insensitive)
           const match = searchData.data.results.find(s =>
             s.name && s.name.toLowerCase() === speakerName.toLowerCase()
@@ -54,17 +60,24 @@ module.exports = async (req, res) => {
             speakerId = match.speaker;
             console.log('Found exact match:', speakerId, 'Name:', match.name);
           } else {
-            // Try partial match
-            const partial = searchData.data.results.find(s =>
-              s.name && s.name.toLowerCase().includes(speakerName.toLowerCase())
+            // Use first result from keyword search as best match
+            speakerId = searchData.data.results[0].speaker;
+            console.log('Using first keyword result:', speakerId, 'Name:', searchData.data.results[0].name);
+          }
+        }
+
+        // If keyword search returned nothing, try broader search
+        if (!speakerId) {
+          const broadUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=800';
+          const broadRes = await fetch(broadUrl, { headers });
+          const broadData = await broadRes.json();
+          if (broadData.data && broadData.data.results) {
+            const m = broadData.data.results.find(s =>
+              s.name && s.name.toLowerCase() === speakerName.toLowerCase()
             );
-            if (partial) {
-              speakerId = partial.speaker;
-              console.log('Found partial match:', speakerId, 'Name:', partial.name);
-            } else {
-              // Log first 20 speaker names to help debug
-              const names = searchData.data.results.slice(0, 20).map(s => s.name);
-              console.log('No match found. First 20 names:', JSON.stringify(names));
+            if (m) {
+              speakerId = m.speaker;
+              console.log('Found in broad search:', speakerId, 'Name:', m.name);
             }
           }
         }
@@ -101,7 +114,7 @@ module.exports = async (req, res) => {
       source: 'web'
     };
 
-    console.log('TTS payload:', JSON.stringify(payload));
+    console.log('TTS payload speaker:', speakerId);
 
     const r = await fetch('https://moyin-gateway.dupdub.com/tts/v1/playDemo/dubForSpeaker', {
       method: 'POST',
