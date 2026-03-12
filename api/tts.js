@@ -28,70 +28,43 @@ module.exports = async (req, res) => {
     const allText = finalTextList.join(' ');
     const isHindi = hasHindi(allText);
     const lang = isHindi ? 'Hindi' : 'English';
-    
-    console.log('Speaker from frontend:', speaker, '| Language:', lang);
-
-    // Resolve speaker: search DupDub API by name to get technical speaker ID
-    let speakerId = null;
     const speakerName = (speaker || '').trim();
-    
+
+    console.log('Speaker from frontend:', speakerName, '| Language:', lang);
+
+    // Resolve speaker: search DupDub API by name with large pageSize
+    let speakerId = null;
+
     if (speakerName) {
       try {
-        // Search in the correct language
-        const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=' + lang + '&pageSize=50';
+        // Search with large pageSize to get ALL voices at once
+        const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=800';
         const searchRes = await fetch(searchUrl, { headers });
         const searchData = await searchRes.json();
-        
+
+        console.log('Search response code:', searchData.code, 'results count:', searchData.data && searchData.data.results ? searchData.data.results.length : 0);
+
         if (searchData.data && searchData.data.results && searchData.data.results.length > 0) {
           // Find exact match by display name (case-insensitive)
-          const match = searchData.data.results.find(s => 
+          const match = searchData.data.results.find(s =>
             s.name && s.name.toLowerCase() === speakerName.toLowerCase()
           );
-          
+
           if (match) {
             speakerId = match.speaker;
-            console.log('Found exact match:', speakerId, 'for', speakerName);
+            console.log('Found exact match:', speakerId, 'Name:', match.name);
           } else {
             // Try partial match
-            const partial = searchData.data.results.find(s => 
+            const partial = searchData.data.results.find(s =>
               s.name && s.name.toLowerCase().includes(speakerName.toLowerCase())
             );
             if (partial) {
               speakerId = partial.speaker;
-              console.log('Found partial match:', speakerId, 'for', speakerName);
-            }
-          }
-          
-          // If Hindi text and no match found in Hindi, search all languages
-          if (!speakerId && !isHindi) {
-            // Try page 2
-            const searchUrl2 = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=' + lang + '&pageSize=50&pageNum=2';
-            const searchRes2 = await fetch(searchUrl2, { headers });
-            const searchData2 = await searchRes2.json();
-            if (searchData2.data && searchData2.data.results) {
-              const match2 = searchData2.data.results.find(s => 
-                s.name && s.name.toLowerCase() === speakerName.toLowerCase()
-              );
-              if (match2) {
-                speakerId = match2.speaker;
-                console.log('Found on page 2:', speakerId);
-              }
-            }
-          }
-          
-          // If still no match, try searching ALL languages (no filter)
-          if (!speakerId) {
-            const searchUrlAll = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=100';
-            const searchResAll = await fetch(searchUrlAll, { headers });
-            const searchDataAll = await searchResAll.json();
-            if (searchDataAll.data && searchDataAll.data.results) {
-              const matchAll = searchDataAll.data.results.find(s => 
-                s.name && s.name.toLowerCase() === speakerName.toLowerCase()
-              );
-              if (matchAll) {
-                speakerId = matchAll.speaker;
-                console.log('Found in all-language search:', speakerId, 'lang:', matchAll.language);
-              }
+              console.log('Found partial match:', speakerId, 'Name:', partial.name);
+            } else {
+              // Log first 20 speaker names to help debug
+              const names = searchData.data.results.slice(0, 20).map(s => s.name);
+              console.log('No match found. First 20 names:', JSON.stringify(names));
             }
           }
         }
@@ -100,7 +73,7 @@ module.exports = async (req, res) => {
       }
     }
 
-    // If still no speakerId, use first available speaker for the language
+    // Fallback: get first speaker for the language
     if (!speakerId) {
       console.log('No match for "' + speakerName + '". Getting first', lang, 'speaker...');
       try {
@@ -176,6 +149,7 @@ module.exports = async (req, res) => {
     const audioRes = await fetch(audioUrl);
     const audioCt = audioRes.headers.get('content-type') || 'audio/mpeg';
     const audioBuffer = await audioRes.buffer();
+
     console.log('Audio size:', audioBuffer.length);
 
     if (audioBuffer.length < 100) {
