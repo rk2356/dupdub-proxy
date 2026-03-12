@@ -1,5 +1,4 @@
 const fetch = require('node-fetch');
-const crypto = require('crypto');
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -9,7 +8,7 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   if (req.method === 'GET') {
-    return res.status(200).json({ status: 'ok', message: 'DupDub TTS Proxy is running. Send POST request.' });
+    return res.status(200).json({ status: 'ok', message: 'DupDub TTS Proxy running. Send POST request.' });
   }
 
   if (req.method !== 'POST') {
@@ -17,34 +16,32 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const { appkey, secret, text, speaker, speed, pitch, volume, audio_type } = req.body;
+    const { apiKey, speaker, speed, pitch, textList, text } = req.body;
 
-    if (!appkey || !secret) {
-      return res.status(400).json({ error: 'appkey and secret are required' });
-    }
-    if (!text) {
-      return res.status(400).json({ error: 'text is required' });
+    if (!apiKey) {
+      return res.status(400).json({ error: 'apiKey is required' });
     }
 
-    const timestamp = Math.floor(Date.now() / 1000);
-    const signature = crypto.createHash('md5').update(appkey + secret + timestamp).digest('hex');
+    const finalTextList = textList || (text ? [text] : []);
+    if (finalTextList.length === 0) {
+      return res.status(400).json({ error: 'text or textList is required' });
+    }
 
-    const params = new URLSearchParams();
-    params.append('appkey', appkey);
-    params.append('signature', signature);
-    params.append('timestamp', timestamp.toString());
-    params.append('text', text);
-    params.append('product', 'openapi');
-    if (speaker) params.append('speaker', speaker);
-    if (speed) params.append('speed', speed.toString());
-    if (pitch !== undefined && pitch !== null) params.append('pitch', pitch.toString());
-    if (volume) params.append('volume', volume.toString());
-    params.append('audio_type', audio_type || 'mp3');
+    const payload = {
+      speaker: speaker || 'mercury_jane@hopeful',
+      speed: speed || 1.0,
+      pitch: pitch || 0,
+      textList: finalTextList,
+      source: 'web'
+    };
 
-    const r = await fetch('https://openapi.dupdub.com/api/tts/v1', {
+    const r = await fetch('https://moyin-gateway.dupdub.com/tts/v1/playDemo/dubForSpeaker', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: params.toString()
+      headers: {
+        'dupdub_token': apiKey,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
     });
 
     const contentType = r.headers.get('content-type') || '';
