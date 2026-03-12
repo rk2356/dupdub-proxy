@@ -51,40 +51,57 @@ module.exports = async (req, res) => {
     }
 
     const data = await r.json();
-    console.log('DupDub response keys:', Object.keys(data));
+    console.log('DupDub FULL response:', JSON.stringify(data).substring(0, 800));
 
-    // Find audio URL in response
-    function findAudioUrl(obj) {
-      if (!obj || typeof obj !== 'object') return null;
+    // Check for DupDub error responses
+    if (data.code && data.code !== 200 && data.code !== 0) {
+      return res.status(500).json({ error: 'DupDub API error: ' + (data.message || 'Unknown error'), code: data.code });
+    }
+
+    // Find audio URL in response (search all nested objects)
+    function findAudioUrl(obj, depth) {
+      if (!obj || typeof obj !== 'object' || depth > 5) return null;
+      if (typeof obj === 'string' && (obj.endsWith('.mp3') || obj.endsWith('.wav') || obj.includes('speech-public'))) return obj;
       if (obj.ossFile) return obj.ossFile;
       if (obj.duration_address) return obj.duration_address;
       if (obj.audio_url) return obj.audio_url;
+      if (obj.audioUrl) return obj.audioUrl;
+      if (obj.url && typeof obj.url === 'string' && obj.url.includes('http')) return obj.url;
+      if (Array.isArray(obj)) {
+        for (const item of obj) {
+          const found = findAudioUrl(item, (depth||0)+1);
+          if (found) return found;
+        }
+      }
       for (const key of Object.keys(obj)) {
-        if (typeof obj[key] === 'object') {
-          const found = findAudioUrl(obj[key]);
+        if (typeof obj[key] === 'object' || typeof obj[key] === 'string') {
+          const found = findAudioUrl(obj[key], (depth||0)+1);
           if (found) return found;
         }
       }
       return null;
     }
 
-    const audioUrl = findAudioUrl(data);
-    console.log('Found audio URL:', audioUrl ? audioUrl.substring(0, 80) : 'none');
+    const audioUrl = findAudioUrl(data, 0);
+    console.log('Found audio URL:', audioUrl ? audioUrl.substring(0, 100) : 'none');
 
     if (!audioUrl) {
-      return res.status(500).json({ error: 'No audio URL in DupDub response', raw: JSON.stringify(data).substring(0, 200) });
+      return res.status(500).json({
+        error: 'No audio in DupDub response. Message: ' + (data.message || 'none'),
+        dupdub_code: data.code,
+        dupdub_message: data.message
+      });
     }
 
-    // Fetch the actual audio file and stream it back as binary
-    console.log('Fetching audio binary from URL...');
+    // Fetch the actual audio file and stream it back
+    console.log('Fetching audio binary...');
     const audioRes = await fetch(audioUrl);
     const audioCt = audioRes.headers.get('content-type') || 'audio/mpeg';
     const audioBuffer = await audioRes.buffer();
-    console.log('Audio fetched, size:', audioBuffer.length, 'type:', audioCt);
+    console.log('Audio size:', audioBuffer.length, 'type:', audioCt);
 
     if (audioBuffer.length < 100) {
-      // Too small, probably not real audio
-      return res.status(500).json({ error: 'Audio file too small, may not be valid', size: audioBuffer.length });
+      return res.status(500).json({ error: 'Audio file too small', size: audioBuffer.length });
     }
 
     res.setHeader('Content-Type', audioCt.includes('audio') ? audioCt : 'audio/mpeg');
