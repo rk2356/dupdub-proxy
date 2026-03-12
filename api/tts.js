@@ -8,6 +8,13 @@ function hasHindi(text) {
   return /[\u0900-\u097F]/.test(text);
 }
 
+// Check if speaker is a known English speaker
+function isEnglishSpeaker(sp) {
+  if (!sp) return false;
+  const englishNames = ['mercury', 'jane', 'john', 'emma', 'david', 'sarah', 'michael', 'rachel'];
+  return englishNames.some(n => sp.toLowerCase().includes(n));
+}
+
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
@@ -29,18 +36,23 @@ module.exports = async (req, res) => {
     if (finalTextList.length === 0) return res.status(400).json({ error: 'text is required' });
 
     const headers = { 'dupdub_token': apiKey, 'Content-Type': 'application/json' };
+    const allText = finalTextList.join(' ');
+    const isHindi = hasHindi(allText);
+    
+    console.log('Text language detected:', isHindi ? 'Hindi' : 'English', '| Provided speaker:', speaker);
 
-    // If speaker already has @ format, use it directly
     let speakerId = speaker && speaker.includes('@') ? speaker : null;
 
-    // If no valid speaker ID, detect language and try to find one
+    // CRITICAL: If Hindi text but English speaker provided, we MUST override
+    if (isHindi && speakerId && isEnglishSpeaker(speakerId)) {
+      console.log('Hindi text detected but English speaker provided. Overriding...');
+      speakerId = null; // Force search for Hindi speaker
+    }
+
+    // If no valid speaker ID, detect language and find one
     if (!speakerId) {
-      const allText = finalTextList.join(' ');
-      const isHindi = hasHindi(allText);
-      
-      // Try to find speaker from DupDub API
       const lang = isHindi ? 'Hindi' : 'English';
-      console.log('No speaker@ ID provided. Searching for', lang, 'speakers...');
+      console.log('Searching for', lang, 'speakers from DupDub API...');
       
       try {
         const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=' + lang;
@@ -48,7 +60,6 @@ module.exports = async (req, res) => {
         const searchData = await searchRes.json();
         
         if (searchData.data && searchData.data.length > 0) {
-          // Pick first available speaker
           const firstSpeaker = searchData.data[0];
           speakerId = firstSpeaker.speakerId || firstSpeaker.speaker || firstSpeaker.name;
           console.log('Found speaker from API:', speakerId);
@@ -81,6 +92,7 @@ module.exports = async (req, res) => {
     });
 
     const contentType = r.headers.get('content-type') || '';
+
     if (contentType.includes('audio')) {
       const buffer = await r.buffer();
       res.setHeader('Content-Type', contentType);
@@ -111,7 +123,7 @@ module.exports = async (req, res) => {
     }
 
     const audioUrl = findAudioUrl(data, 0);
-    console.log('Audio URL:', audioUrl ? audioUrl.substring(0, 80) : 'none');
+    console.log('Found audio URL:', audioUrl ? audioUrl.substring(0, 80) : 'none');
 
     if (!audioUrl) {
       return res.status(500).json({ error: 'No audio generated. DupDub said: ' + (data.message || 'Unknown') });
@@ -130,6 +142,7 @@ module.exports = async (req, res) => {
     res.setHeader('Content-Type', audioCt.includes('audio') ? audioCt : 'audio/mpeg');
     res.setHeader('Content-Length', audioBuffer.length);
     return res.status(200).send(audioBuffer);
+
   } catch (err) {
     console.log('Proxy error:', err.message);
     res.status(500).json({ error: 'Proxy error: ' + err.message });
