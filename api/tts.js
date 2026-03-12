@@ -1,15 +1,7 @@
 const fetch = require('node-fetch');
 
-const ENGLISH_SPEAKER = 'mercury_jane@hopeful';
-
 function hasHindi(text) {
   return /[\u0900-\u097F]/.test(text);
-}
-
-function isEnglishSpeaker(sp) {
-  if (!sp) return false;
-  const englishNames = ['mercury', 'jane', 'john', 'emma', 'david', 'sarah', 'michael', 'rachel', 'spiderman', 'spoongy'];
-  return englishNames.some(n => sp.toLowerCase().includes(n));
 }
 
 module.exports = async (req, res) => {
@@ -35,43 +27,97 @@ module.exports = async (req, res) => {
     const headers = { 'dupdub_token': apiKey, 'Content-Type': 'application/json' };
     const allText = finalTextList.join(' ');
     const isHindi = hasHindi(allText);
+    const lang = isHindi ? 'Hindi' : 'English';
     
-    console.log('Language:', isHindi ? 'Hindi' : 'English', '| Speaker from frontend:', speaker);
+    console.log('Speaker from frontend:', speaker, '| Language:', lang);
 
-    let speakerId = speaker && speaker.includes('_') ? speaker : null;
-
-    // If Hindi text but non-Hindi speaker, override
-    if (isHindi && speakerId && !speakerId.toLowerCase().includes('hindi')) {
-      console.log('Hindi text but non-Hindi speaker. Will search for Hindi speaker.');
-      speakerId = null;
-    }
-
-    // If no valid speaker, search DupDub API
-    if (!speakerId) {
-      const lang = isHindi ? 'Hindi' : 'English';
-      console.log('Searching for', lang, 'speakers...');
-      
+    // Resolve speaker: search DupDub API by name to get technical speaker ID
+    let speakerId = null;
+    const speakerName = (speaker || '').trim();
+    
+    if (speakerName) {
       try {
-        const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=' + lang;
+        // Search in the correct language
+        const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=' + lang + '&pageSize=50';
         const searchRes = await fetch(searchUrl, { headers });
         const searchData = await searchRes.json();
-        console.log('Search response code:', searchData.code, 'results count:', searchData.data?.results?.length || 0);
         
-        // API returns {data: {results: [...]}}
         if (searchData.data && searchData.data.results && searchData.data.results.length > 0) {
-          // Use the 'speaker' field which is what dubForSpeaker needs
-          const firstSpeaker = searchData.data.results[0];
-          speakerId = firstSpeaker.speaker;
-          console.log('Found speaker:', speakerId, 'Name:', firstSpeaker.name);
+          // Find exact match by display name (case-insensitive)
+          const match = searchData.data.results.find(s => 
+            s.name && s.name.toLowerCase() === speakerName.toLowerCase()
+          );
+          
+          if (match) {
+            speakerId = match.speaker;
+            console.log('Found exact match:', speakerId, 'for', speakerName);
+          } else {
+            // Try partial match
+            const partial = searchData.data.results.find(s => 
+              s.name && s.name.toLowerCase().includes(speakerName.toLowerCase())
+            );
+            if (partial) {
+              speakerId = partial.speaker;
+              console.log('Found partial match:', speakerId, 'for', speakerName);
+            }
+          }
+          
+          // If Hindi text and no match found in Hindi, search all languages
+          if (!speakerId && !isHindi) {
+            // Try page 2
+            const searchUrl2 = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=' + lang + '&pageSize=50&pageNum=2';
+            const searchRes2 = await fetch(searchUrl2, { headers });
+            const searchData2 = await searchRes2.json();
+            if (searchData2.data && searchData2.data.results) {
+              const match2 = searchData2.data.results.find(s => 
+                s.name && s.name.toLowerCase() === speakerName.toLowerCase()
+              );
+              if (match2) {
+                speakerId = match2.speaker;
+                console.log('Found on page 2:', speakerId);
+              }
+            }
+          }
+          
+          // If still no match, try searching ALL languages (no filter)
+          if (!speakerId) {
+            const searchUrlAll = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=100';
+            const searchResAll = await fetch(searchUrlAll, { headers });
+            const searchDataAll = await searchResAll.json();
+            if (searchDataAll.data && searchDataAll.data.results) {
+              const matchAll = searchDataAll.data.results.find(s => 
+                s.name && s.name.toLowerCase() === speakerName.toLowerCase()
+              );
+              if (matchAll) {
+                speakerId = matchAll.speaker;
+                console.log('Found in all-language search:', speakerId, 'lang:', matchAll.language);
+              }
+            }
+          }
         }
       } catch (e) {
-        console.log('Speaker search failed:', e.message);
+        console.log('Speaker search error:', e.message);
       }
-      
-      if (!speakerId) {
-        speakerId = isHindi ? 'saturn_swara_neural' : ENGLISH_SPEAKER;
-        console.log('Using fallback:', speakerId);
+    }
+
+    // If still no speakerId, use first available speaker for the language
+    if (!speakerId) {
+      console.log('No match for "' + speakerName + '". Getting first', lang, 'speaker...');
+      try {
+        const fallbackUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=' + lang;
+        const fallbackRes = await fetch(fallbackUrl, { headers });
+        const fallbackData = await fallbackRes.json();
+        if (fallbackData.data && fallbackData.data.results && fallbackData.data.results.length > 0) {
+          speakerId = fallbackData.data.results[0].speaker;
+          console.log('Using first available:', speakerId);
+        }
+      } catch (e) {
+        console.log('Fallback search error:', e.message);
       }
+    }
+
+    if (!speakerId) {
+      return res.status(400).json({ error: 'Could not find any speaker for: ' + speakerName });
     }
 
     const payload = {
