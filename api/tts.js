@@ -29,60 +29,36 @@ module.exports = async (req, res) => {
     const isHindi = hasHindi(allText);
     const lang = isHindi ? 'Hindi' : 'English';
     const speakerName = (speaker || '').trim();
-
     console.log('Speaker from frontend:', speakerName, '| Language:', lang);
 
-    // Resolve speaker using keyword search for precise matching
+    // Resolve speaker using broad search with exact name matching
     let speakerId = null;
-
     if (speakerName) {
       try {
-        // Use keyword parameter to search for the exact speaker name
-        const encodedName = encodeURIComponent(speakerName);
-        const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?keyword=' + encodedName + '&pageSize=20';
-        const searchRes = await fetch(searchUrl, { headers });
-        const searchData = await searchRes.json();
+        const broadUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=800';
+        const broadRes = await fetch(broadUrl, { headers });
+        const broadData = await broadRes.json();
+        const totalResults = broadData.data && broadData.data.results ? broadData.data.results.length : 0;
+        console.log('Broad search results:', totalResults);
 
-        console.log('Keyword search for:', speakerName, '| Results:', searchData.data && searchData.data.results ? searchData.data.results.length : 0);
-
-        if (searchData.data && searchData.data.results && searchData.data.results.length > 0) {
-          // Log all results to debug
-          searchData.data.results.forEach(s => {
-            console.log('  Result:', s.name, '| speaker:', s.speaker ? s.speaker.substring(0, 40) : 'none');
-          });
-
+        if (broadData.data && broadData.data.results && broadData.data.results.length > 0) {
           // Find exact match by display name (case-insensitive)
-          const match = searchData.data.results.find(s =>
+          const match = broadData.data.results.find(s =>
             s.name && s.name.toLowerCase() === speakerName.toLowerCase()
           );
-
           if (match) {
             speakerId = match.speaker;
-            console.log('Found exact match:', speakerId, 'Name:', match.name);
+            console.log('Found exact match:', match.name, '| Full speaker ID:', speakerId);
           } else {
-            // Use first result from keyword search as best match
-            speakerId = searchData.data.results[0].speaker;
-            console.log('Using first keyword result:', speakerId, 'Name:', searchData.data.results[0].name);
-          }
-        }
-
-        // If keyword search returned nothing, try broader search
-        if (!speakerId) {
-          const broadUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=800';
-          const broadRes = await fetch(broadUrl, { headers });
-          const broadData = await broadRes.json();
-          if (broadData.data && broadData.data.results) {
-            const m = broadData.data.results.find(s =>
-              s.name && s.name.toLowerCase() === speakerName.toLowerCase()
-            );
-            if (m) {
-              speakerId = m.speaker;
-              console.log('Found in broad search:', speakerId, 'Name:', m.name);
-            }
+            // Log first 5 names to debug
+            broadData.data.results.slice(0, 5).forEach(s => {
+              console.log('  Sample:', s.name, '| speaker:', s.speaker);
+            });
+            console.log('No exact match for:', speakerName);
           }
         }
       } catch (e) {
-        console.log('Speaker search error:', e.message);
+        console.log('Broad search error:', e.message);
       }
     }
 
@@ -113,7 +89,6 @@ module.exports = async (req, res) => {
       textList: finalTextList,
       source: 'web'
     };
-
     console.log('TTS payload speaker:', speakerId);
 
     const r = await fetch('https://moyin-gateway.dupdub.com/tts/v1/playDemo/dubForSpeaker', {
@@ -123,7 +98,6 @@ module.exports = async (req, res) => {
     });
 
     const contentType = r.headers.get('content-type') || '';
-
     if (contentType.includes('audio')) {
       const buffer = await r.buffer();
       res.setHeader('Content-Type', contentType);
@@ -162,7 +136,6 @@ module.exports = async (req, res) => {
     const audioRes = await fetch(audioUrl);
     const audioCt = audioRes.headers.get('content-type') || 'audio/mpeg';
     const audioBuffer = await audioRes.buffer();
-
     console.log('Audio size:', audioBuffer.length);
 
     if (audioBuffer.length < 100) {
@@ -172,7 +145,6 @@ module.exports = async (req, res) => {
     res.setHeader('Content-Type', audioCt.includes('audio') ? audioCt : 'audio/mpeg');
     res.setHeader('Content-Length', audioBuffer.length);
     return res.status(200).send(audioBuffer);
-
   } catch (err) {
     console.log('Proxy error:', err.message);
     res.status(500).json({ error: 'Proxy error: ' + err.message });
