@@ -1,5 +1,13 @@
 const fetch = require('node-fetch');
 
+// Hindi speaker fallback - detected from DupDub Hindi voices
+const HINDI_SPEAKERS = ['swara_madhuri@friendly', 'amitabh_hero@confident', 'priya_bollywood@cheerful'];
+const ENGLISH_SPEAKER = 'mercury_jane@hopeful';
+
+function hasHindi(text) {
+  return /[\u0900-\u097F]/.test(text);
+}
+
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
@@ -22,9 +30,38 @@ module.exports = async (req, res) => {
 
     const headers = { 'dupdub_token': apiKey, 'Content-Type': 'application/json' };
 
-    let speakerId = 'mercury_jane@hopeful';
-    if (speaker && speaker.includes('@')) {
-      speakerId = speaker;
+    // If speaker already has @ format, use it directly
+    let speakerId = speaker && speaker.includes('@') ? speaker : null;
+
+    // If no valid speaker ID, detect language and try to find one
+    if (!speakerId) {
+      const allText = finalTextList.join(' ');
+      const isHindi = hasHindi(allText);
+      
+      // Try to find speaker from DupDub API
+      const lang = isHindi ? 'Hindi' : 'English';
+      console.log('No speaker@ ID provided. Searching for', lang, 'speakers...');
+      
+      try {
+        const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=' + lang;
+        const searchRes = await fetch(searchUrl, { headers });
+        const searchData = await searchRes.json();
+        
+        if (searchData.data && searchData.data.length > 0) {
+          // Pick first available speaker
+          const firstSpeaker = searchData.data[0];
+          speakerId = firstSpeaker.speakerId || firstSpeaker.speaker || firstSpeaker.name;
+          console.log('Found speaker from API:', speakerId);
+        }
+      } catch (e) {
+        console.log('Speaker search failed:', e.message);
+      }
+      
+      // Final fallback
+      if (!speakerId) {
+        speakerId = isHindi ? 'swara_madhuri@friendly' : ENGLISH_SPEAKER;
+        console.log('Using fallback speaker:', speakerId);
+      }
     }
 
     const payload = {
@@ -51,30 +88,21 @@ module.exports = async (req, res) => {
     }
 
     const data = await r.json();
-    console.log('DupDub FULL response:', JSON.stringify(data).substring(0, 800));
+    console.log('DupDub response:', JSON.stringify(data).substring(0, 500));
 
-    // Check for DupDub error responses
-    if (data.code && data.code !== 200 && data.code !== 0) {
-      return res.status(500).json({ error: 'DupDub API error: ' + (data.message || 'Unknown error'), code: data.code });
+    // Check for DupDub error
+    if (data.message && data.message !== 'Succeed' && data.message !== 'OK' && data.result === null) {
+      return res.status(400).json({ error: data.message });
     }
 
-    // Find audio URL in response (search all nested objects)
+    // Find audio URL
     function findAudioUrl(obj, depth) {
       if (!obj || typeof obj !== 'object' || depth > 5) return null;
-      if (typeof obj === 'string' && (obj.endsWith('.mp3') || obj.endsWith('.wav') || obj.includes('speech-public'))) return obj;
       if (obj.ossFile) return obj.ossFile;
       if (obj.duration_address) return obj.duration_address;
       if (obj.audio_url) return obj.audio_url;
-      if (obj.audioUrl) return obj.audioUrl;
-      if (obj.url && typeof obj.url === 'string' && obj.url.includes('http')) return obj.url;
-      if (Array.isArray(obj)) {
-        for (const item of obj) {
-          const found = findAudioUrl(item, (depth||0)+1);
-          if (found) return found;
-        }
-      }
       for (const key of Object.keys(obj)) {
-        if (typeof obj[key] === 'object' || typeof obj[key] === 'string') {
+        if (typeof obj[key] === 'object') {
           const found = findAudioUrl(obj[key], (depth||0)+1);
           if (found) return found;
         }
@@ -83,25 +111,20 @@ module.exports = async (req, res) => {
     }
 
     const audioUrl = findAudioUrl(data, 0);
-    console.log('Found audio URL:', audioUrl ? audioUrl.substring(0, 100) : 'none');
+    console.log('Audio URL:', audioUrl ? audioUrl.substring(0, 80) : 'none');
 
     if (!audioUrl) {
-      return res.status(500).json({
-        error: 'No audio in DupDub response. Message: ' + (data.message || 'none'),
-        dupdub_code: data.code,
-        dupdub_message: data.message
-      });
+      return res.status(500).json({ error: 'No audio generated. DupDub said: ' + (data.message || 'Unknown') });
     }
 
-    // Fetch the actual audio file and stream it back
-    console.log('Fetching audio binary...');
+    // Fetch audio binary
     const audioRes = await fetch(audioUrl);
     const audioCt = audioRes.headers.get('content-type') || 'audio/mpeg';
     const audioBuffer = await audioRes.buffer();
-    console.log('Audio size:', audioBuffer.length, 'type:', audioCt);
+    console.log('Audio size:', audioBuffer.length);
 
     if (audioBuffer.length < 100) {
-      return res.status(500).json({ error: 'Audio file too small', size: audioBuffer.length });
+      return res.status(500).json({ error: 'Audio too small' });
     }
 
     res.setHeader('Content-Type', audioCt.includes('audio') ? audioCt : 'audio/mpeg');
@@ -109,6 +132,6 @@ module.exports = async (req, res) => {
     return res.status(200).send(audioBuffer);
   } catch (err) {
     console.log('Proxy error:', err.message);
-    res.status(500).json({ error: 'Proxy error', details: err.message });
+    res.status(500).json({ error: 'Proxy error: ' + err.message });
   }
 };
