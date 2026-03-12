@@ -1,4 +1,5 @@
 const fetch = require('node-fetch');
+const crypto = require('crypto');
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -8,7 +9,7 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   if (req.method === 'GET') {
-    return res.status(200).json({ status: 'ok', message: 'DupDub TTS Proxy is running. Send POST request to use.' });
+    return res.status(200).json({ status: 'ok', message: 'DupDub TTS Proxy is running. Send POST request.' });
   }
 
   if (req.method !== 'POST') {
@@ -16,23 +17,46 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const { apiKey, ...body } = req.body;
+    const { appkey, secret, text, speaker, speed, pitch, volume, audio_type } = req.body;
 
-    if (!apiKey) {
-      return res.status(400).json({ error: 'apiKey is required' });
+    if (!appkey || !secret) {
+      return res.status(400).json({ error: 'appkey and secret are required' });
+    }
+    if (!text) {
+      return res.status(400).json({ error: 'text is required' });
     }
 
-    const r = await fetch('https://api.dupdub.com/v1/tts', {
+    const timestamp = Math.floor(Date.now() / 1000);
+    const signature = crypto.createHash('md5').update(appkey + secret + timestamp).digest('hex');
+
+    const params = new URLSearchParams();
+    params.append('appkey', appkey);
+    params.append('signature', signature);
+    params.append('timestamp', timestamp.toString());
+    params.append('text', text);
+    params.append('product', 'openapi');
+    if (speaker) params.append('speaker', speaker);
+    if (speed) params.append('speed', speed.toString());
+    if (pitch !== undefined && pitch !== null) params.append('pitch', pitch.toString());
+    if (volume) params.append('volume', volume.toString());
+    params.append('audio_type', audio_type || 'mp3');
+
+    const r = await fetch('https://openapi.dupdub.com/api/tts/v1', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + apiKey
-      },
-      body: JSON.stringify(body)
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString()
     });
 
-    const data = await r.json();
-    res.status(r.status).json(data);
+    const contentType = r.headers.get('content-type') || '';
+
+    if (contentType.includes('audio')) {
+      const buffer = await r.buffer();
+      res.setHeader('Content-Type', contentType);
+      res.status(200).send(buffer);
+    } else {
+      const data = await r.json();
+      res.status(r.status).json(data);
+    }
   } catch (err) {
     res.status(500).json({ error: 'Proxy error', details: err.message });
   }
