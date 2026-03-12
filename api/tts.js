@@ -51,22 +51,17 @@ module.exports = async (req, res) => {
     }
 
     const data = await r.json();
-    console.log('DupDub full response:', JSON.stringify(data));
+    console.log('DupDub response keys:', Object.keys(data));
 
-    // Deep search for audio URL in response
+    // Find audio URL in response
     function findAudioUrl(obj) {
       if (!obj || typeof obj !== 'object') return null;
-      if (obj.duration_address) return obj.duration_address;
       if (obj.ossFile) return obj.ossFile;
+      if (obj.duration_address) return obj.duration_address;
       if (obj.audio_url) return obj.audio_url;
-      if (obj.audioUrl) return obj.audioUrl;
       for (const key of Object.keys(obj)) {
-        const found = findAudioUrl(obj[key]);
-        if (found) return found;
-      }
-      if (Array.isArray(obj)) {
-        for (const item of obj) {
-          const found = findAudioUrl(item);
+        if (typeof obj[key] === 'object') {
+          const found = findAudioUrl(obj[key]);
           if (found) return found;
         }
       }
@@ -74,17 +69,27 @@ module.exports = async (req, res) => {
     }
 
     const audioUrl = findAudioUrl(data);
-    console.log('Extracted audio URL:', audioUrl);
+    console.log('Found audio URL:', audioUrl ? audioUrl.substring(0, 80) : 'none');
 
-    if (audioUrl) {
-      return res.status(200).json({
-        audio_url: audioUrl,
-        duration: (data.result && data.result.lengthOfTime) || null
-      });
+    if (!audioUrl) {
+      return res.status(500).json({ error: 'No audio URL in DupDub response', raw: JSON.stringify(data).substring(0, 200) });
     }
 
-    // No audio URL found - return error
-    res.status(500).json({ error: 'No audio URL found in DupDub response', raw: data });
+    // Fetch the actual audio file and stream it back as binary
+    console.log('Fetching audio binary from URL...');
+    const audioRes = await fetch(audioUrl);
+    const audioCt = audioRes.headers.get('content-type') || 'audio/mpeg';
+    const audioBuffer = await audioRes.buffer();
+    console.log('Audio fetched, size:', audioBuffer.length, 'type:', audioCt);
+
+    if (audioBuffer.length < 100) {
+      // Too small, probably not real audio
+      return res.status(500).json({ error: 'Audio file too small, may not be valid', size: audioBuffer.length });
+    }
+
+    res.setHeader('Content-Type', audioCt.includes('audio') ? audioCt : 'audio/mpeg');
+    res.setHeader('Content-Length', audioBuffer.length);
+    return res.status(200).send(audioBuffer);
   } catch (err) {
     console.log('Proxy error:', err.message);
     res.status(500).json({ error: 'Proxy error', details: err.message });
