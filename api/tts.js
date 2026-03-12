@@ -51,35 +51,40 @@ module.exports = async (req, res) => {
     }
 
     const data = await r.json();
-    console.log('DupDub response:', JSON.stringify(data).substring(0, 500));
+    console.log('DupDub full response:', JSON.stringify(data));
 
-    // Handle DupDub response: { message: "Succeed", result: { duration_address, ossFile, ... } }
-    if (data.message === 'Succeed' && data.result) {
-      const audioUrl = data.result.duration_address || data.result.ossFile || '';
-      if (audioUrl) {
-        return res.status(200).json({
-          audio_url: audioUrl,
-          duration: data.result.lengthOfTime,
-          message: 'success'
-        });
+    // Deep search for audio URL in response
+    function findAudioUrl(obj) {
+      if (!obj || typeof obj !== 'object') return null;
+      if (obj.duration_address) return obj.duration_address;
+      if (obj.ossFile) return obj.ossFile;
+      if (obj.audio_url) return obj.audio_url;
+      if (obj.audioUrl) return obj.audioUrl;
+      for (const key of Object.keys(obj)) {
+        const found = findAudioUrl(obj[key]);
+        if (found) return found;
       }
+      if (Array.isArray(obj)) {
+        for (const item of obj) {
+          const found = findAudioUrl(item);
+          if (found) return found;
+        }
+      }
+      return null;
     }
 
-    // Also handle { code: 200, data: { resList: [...] } } format
-    if (data.code === 200 && data.data && data.data.resList && data.data.resList.length > 0) {
-      const result = data.data.resList[0];
-      const audioUrl = result.duration_address || result.ossFile || '';
-      if (audioUrl) {
-        return res.status(200).json({
-          audio_url: audioUrl,
-          duration: result.lengthOfTime,
-          message: 'success'
-        });
-      }
+    const audioUrl = findAudioUrl(data);
+    console.log('Extracted audio URL:', audioUrl);
+
+    if (audioUrl) {
+      return res.status(200).json({
+        audio_url: audioUrl,
+        duration: (data.result && data.result.lengthOfTime) || null
+      });
     }
 
-    // Return raw response if we can't extract audio
-    res.status(r.status).json(data);
+    // No audio URL found - return error
+    res.status(500).json({ error: 'No audio URL found in DupDub response', raw: data });
   } catch (err) {
     console.log('Proxy error:', err.message);
     res.status(500).json({ error: 'Proxy error', details: err.message });
