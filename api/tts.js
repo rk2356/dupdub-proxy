@@ -22,8 +22,11 @@ module.exports = async (req, res) => {
 
     const headers = { 'dupdub_token': apiKey, 'Content-Type': 'application/json' };
 
-    // Use speaker as-is, fallback to mercury_jane@hopeful
-    const speakerId = speaker || 'mercury_jane@hopeful';
+    // Speaker must be in name@style format. If not, use fallback.
+    let speakerId = 'mercury_jane@hopeful';
+    if (speaker && speaker.includes('@')) {
+      speakerId = speaker;
+    }
 
     const payload = {
       speaker: speakerId,
