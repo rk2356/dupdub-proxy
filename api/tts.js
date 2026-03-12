@@ -1,15 +1,5 @@
 const fetch = require('node-fetch');
 
-// Known speaker ID mapping (display name -> DupDub internal ID)
-const SPEAKER_MAP = {
-  'spoongy': 'spoongy@default',
-  'sunshine blondie': 'sunshine_blondie@default',
-  'adam': 'adam@default',
-  'kung master': 'kung_master@default',
-  'panda warrior': 'panda_warrior@default',
-  'mercury jane': 'mercury_jane@hopeful'
-};
-
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
@@ -32,49 +22,58 @@ module.exports = async (req, res) => {
 
     const headers = { 'dupdub_token': apiKey, 'Content-Type': 'application/json' };
 
-    // Resolve speaker ID
-    let speakerId = speaker || 'mercury_jane@hopeful';
-    const lowerSpeaker = speakerId.toLowerCase();
+    // Always search for speaker to get real ID
+    let speakerId = 'mercury_jane@hopeful'; // fallback
+    const inputSpeaker = (speaker || '').toLowerCase().trim();
 
-    // If not already in name@style format, try lookup
-    if (!speakerId.includes('@')) {
-      // Check hardcoded map first
-      if (SPEAKER_MAP[lowerSpeaker]) {
-        speakerId = SPEAKER_MAP[lowerSpeaker];
-      } else {
-        // Search DupDub API for speaker
-        try {
-          const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=English&domainId=1&gender=';
-          const searchRes = await fetch(searchUrl, { headers });
-          if (searchRes.ok) {
-            const searchData = await searchRes.json();
-            console.log('Speaker search response keys:', Object.keys(searchData));
-            // Try to find in various response structures
-            let list = [];
-            if (searchData.data && Array.isArray(searchData.data)) list = searchData.data;
-            else if (searchData.data && searchData.data.list) list = searchData.data.list;
-            else if (searchData.data && searchData.data.records) list = searchData.data.records;
-            else if (Array.isArray(searchData)) list = searchData;
-
-            if (list.length > 0) {
-              console.log('First speaker sample:', JSON.stringify(list[0]).substring(0, 200));
-              const found = list.find(s => {
-                const names = [s.name, s.speakerName, s.speaker, s.displayName].filter(Boolean).map(n => n.toLowerCase());
-                return names.some(n => n === lowerSpeaker || n.includes(lowerSpeaker));
-              });
-              if (found) {
-                speakerId = found.speaker || found.speakerId || found.id || speakerId;
-                console.log('Found speaker:', speakerId);
-              }
+    if (inputSpeaker && inputSpeaker.includes('@')) {
+      speakerId = inputSpeaker; // already in correct format
+    } else if (inputSpeaker) {
+      try {
+        const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=English&domainId=1&gender=';
+        const searchRes = await fetch(searchUrl, { headers });
+        if (searchRes.ok) {
+          const searchData = await searchRes.json();
+          const dataObj = searchData.data || searchData;
+          let list = [];
+          if (Array.isArray(dataObj)) list = dataObj;
+          else if (dataObj && dataObj.list) list = dataObj.list;
+          else if (dataObj && dataObj.records) list = dataObj.records;
+          else if (dataObj && typeof dataObj === 'object') {
+            // Try all array values
+            for (const key of Object.keys(dataObj)) {
+              if (Array.isArray(dataObj[key])) { list = dataObj[key]; break; }
             }
           }
-        } catch (searchErr) {
-          console.log('Speaker search error:', searchErr.message);
+
+          // Log structure for debugging
+          console.log('Search data type:', typeof dataObj, 'keys:', dataObj ? Object.keys(dataObj).slice(0, 5) : 'null');
+          if (list.length > 0) {
+            console.log('Sample speakers:', list.slice(0, 3).map(s => JSON.stringify(s).substring(0, 150)));
+            // Try to find matching speaker
+            const found = list.find(s => {
+              const allFields = JSON.stringify(s).toLowerCase();
+              return allFields.includes(inputSpeaker);
+            });
+            if (found) {
+              // Get the speaker field (the one used in API calls)
+              speakerId = found.speaker || found.speakerId || found.speakerKey || found.id || speakerId;
+              console.log('Matched speaker:', speakerId, 'from:', JSON.stringify(found).substring(0, 200));
+            } else {
+              console.log('No match for:', inputSpeaker, 'in', list.length, 'speakers');
+            }
+          } else {
+            console.log('Empty speaker list. Raw keys:', JSON.stringify(searchData).substring(0, 300));
+          }
+        } else {
+          console.log('Search API failed:', searchRes.status);
         }
+      } catch (searchErr) {
+        console.log('Search error:', searchErr.message);
       }
     }
 
-    console.log('Using speaker:', speakerId, 'for input:', speaker);
+    console.log('Final speaker:', speakerId, '| Input:', speaker);
 
     const payload = {
       speaker: speakerId,
@@ -84,8 +83,6 @@ module.exports = async (req, res) => {
       source: 'web'
     };
 
-    console.log('TTS payload:', JSON.stringify(payload));
-
     const r = await fetch('https://moyin-gateway.dupdub.com/tts/v1/playDemo/dubForSpeaker', {
       method: 'POST',
       headers,
@@ -93,7 +90,6 @@ module.exports = async (req, res) => {
     });
 
     const contentType = r.headers.get('content-type') || '';
-    console.log('DupDub response status:', r.status, 'content-type:', contentType);
 
     if (contentType.includes('audio')) {
       const buffer = await r.buffer();
@@ -101,7 +97,14 @@ module.exports = async (req, res) => {
       res.status(200).send(buffer);
     } else {
       const data = await r.json();
-      console.log('DupDub response body:', JSON.stringify(data).substring(0, 500));
+      console.log('DupDub TTS response:', JSON.stringify(data).substring(0, 500));
+      // If speaker failed, return both error and debug info
+      if (data.code && data.code !== 0) {
+        return res.status(200).json({
+          ...data,
+          debug: { speakerUsed: speakerId, inputSpeaker: speaker }
+        });
+      }
       res.status(r.status).json(data);
     }
   } catch (err) {
