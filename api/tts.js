@@ -12,24 +12,33 @@ module.exports = async (req, res) => {
     // Step 1: Lookup correct speaker ID by name
     let speaker = 'uranus_Adam'; // default fallback
     if (speakerName && speakerName !== 'Adam') {
-      const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=50&language=English';
-      const searchRes = await fetch(searchUrl, {
-        headers: { 'dupdub_token': apiKey, 'Content-Type': 'application/json' }
-      });
-      const searchData = await searchRes.json();
-      if (searchData.code === 200 && searchData.data && searchData.data.results) {
-        const found = searchData.data.results.find(s => s.name && s.name.toLowerCase() === speakerName.toLowerCase());
-        if (found && found.speaker) {
-          speaker = found.speaker;
+      // Search WITHOUT language filter and with large pageSize to find multilingual voices
+      let found = null;
+      for (let page = 1; page <= 5 && !found; page++) {
+        const searchUrl = `https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=200&pageNum=${page}`;
+        const searchRes = await fetch(searchUrl, {
+          headers: { 'dupdub_token': apiKey, 'Content-Type': 'application/json' }
+        });
+        const searchData = await searchRes.json();
+        if (searchData.code === 200 && searchData.data && searchData.data.results) {
+          const match = searchData.data.results.find(s => s.name && s.name.toLowerCase() === speakerName.toLowerCase());
+          if (match && match.speaker) {
+            found = match.speaker;
+          }
+          // Stop if we've seen all pages
+          if (page >= searchData.data.totalPages) break;
+        } else {
+          break;
         }
       }
+      if (found) speaker = found;
     }
 
     // Step 2: Generate voice with correct speaker ID
     const r = await fetch('https://moyin-gateway.dupdub.com/tts/v1/playDemo/dubForSpeaker', {
       method: 'POST',
       headers: { 'dupdub_token': apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ speaker: speaker, speed: String(speed || 1.0), pitch: String(pitch || 0), textList: [text] })
+      body: JSON.stringify({ speaker, speed: String(speed || 1.0), pitch: String(pitch || 0), textList: [text] })
     });
     const ct = r.headers.get('content-type') || '';
     if (ct.includes('audio') || ct.includes('octet') || ct.includes('wav') || ct.includes('mpeg')) {
@@ -40,7 +49,5 @@ module.exports = async (req, res) => {
       const data = await r.json();
       res.status(r.status).json(data);
     }
-  } catch (e) {
-    res.status(500).json({error: e.message});
-  }
+  } catch (e) { res.status(500).json({error: e.message}); }
 };
