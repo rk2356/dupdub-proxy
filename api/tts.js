@@ -1,179 +1,46 @@
-const fetch = require('node-fetch');
-
-// Hardcoded speaker IDs from DupDub's actual data-id attributes
-const SPEAKER_MAP = {
-  'spoongy': 'uranus||||c2d38855d8f15bedd8d3881fd6d85647',
-  'sunshine blondie': 'uranus||||e8dea48f91d2325bdab89ac6974f192e',
-  'adam': 'uranus_Adam',
-  'kung master': 'uranus||||57d4e5570cc1cef651cfcbb8c992a26a',
-  'panda warrior': 'uranus||||054c58511d158071e0b4983d68894bd5'
-};
-
-function hasHindi(text) {
-  return /[\u0900-\u097F]/.test(text);
-}
-
-async function findSpeakerId(speakerName, headers) {
-  const nameLower = speakerName.toLowerCase().trim();
-  if (SPEAKER_MAP[nameLower]) {
-    console.log('Found in hardcoded map:', speakerName, '| speaker:', SPEAKER_MAP[nameLower]);
-    return SPEAKER_MAP[nameLower];
-  }
-  try {
-    const keyword = encodeURIComponent(speakerName);
-    const url = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=20&keyword=' + keyword;
-    console.log('Searching speaker by keyword:', speakerName);
-    const res = await fetch(url, { headers });
-    const data = await res.json();
-    if (data.data && data.data.results && data.data.results.length > 0) {
-      const exact = data.data.results.find(s => s.name && s.name.toLowerCase() === nameLower);
-      if (exact) {
-        console.log('Found exact match:', exact.name, '| speaker:', exact.speaker);
-        return exact.speaker;
-      }
-    }
-  } catch (e) {
-    console.log('Keyword search error:', e.message);
-  }
-  return null;
-}
-
-async function callTTS(headers, payload) {
-  const r = await fetch('https://moyin-gateway.dupdub.com/tts/v1/playDemo/dubForSpeaker', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload)
-  });
-  const contentType = r.headers.get('content-type') || '';
-  if (contentType.includes('audio')) {
-    const buffer = await r.buffer();
-    return { type: 'audio', buffer, contentType };
-  }
-  const data = await r.json();
-  return { type: 'json', data };
-}
-
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method === 'GET') {
-    return res.status(200).json({ status: 'ok', message: 'DupDub TTS Proxy running.' });
-  }
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+  if (req.method === 'GET') return res.json({status:'ok', message:'DupDub TTS Proxy running.'});
+
+  const { apiKey, text, speakerName, speed, pitch } = req.body;
+  if (!apiKey || !text) return res.status(400).json({error:'apiKey aur text required'});
 
   try {
-    const { apiKey, speaker, speakerId, speed, pitch, textList, text } = req.body;
-    if (!apiKey) return res.status(400).json({ error: 'apiKey is required' });
-    const finalTextList = textList || (text ? [text] : []);
-    if (finalTextList.length === 0) return res.status(400).json({ error: 'text is required' });
-
-    const headers = { 'dupdub_token': apiKey, 'Content-Type': 'application/json' };
-    const speakerName = (speaker || '').trim();
-    console.log('Speaker from frontend:', speakerName);
-    console.log('SpeakerId from frontend:', speakerId || 'none');
-
-    // PRIORITY: Use speakerId directly if provided from frontend
-    let finalSpeakerId = null;
-    if (speakerId && speakerId.trim()) {
-      finalSpeakerId = speakerId.trim();
-      console.log('Using direct speakerId from frontend:', finalSpeakerId);
-    } else if (speakerName) {
-      finalSpeakerId = await findSpeakerId(speakerName, headers);
-      console.log('Resolved speaker name to ID:', finalSpeakerId);
-    }
-
-    if (!finalSpeakerId) {
-      const allText = finalTextList.join(' ');
-      const lang = hasHindi(allText) ? 'Hindi' : 'English';
-      console.log('No match for "' + speakerName + '". Getting first', lang, 'speaker...');
-      try {
-        const url = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=' + lang;
-        const res2 = await fetch(url, { headers });
-        const data2 = await res2.json();
-        if (data2.data && data2.data.results && data2.data.results.length > 0) {
-          finalSpeakerId = data2.data.results[0].speaker;
-          console.log('Using fallback speaker:', finalSpeakerId);
-        }
-      } catch (e) {
-        console.log('Fallback error:', e.message);
-      }
-    }
-
-    if (!finalSpeakerId) {
-      return res.status(400).json({ error: 'Could not find any speaker for: ' + speakerName });
-    }
-
-    const payload = {
-      speaker: finalSpeakerId,
-      speed: speed || 1.0,
-      pitch: pitch || 0,
-      textList: finalTextList,
-      source: 'web'
-    };
-    console.log('TTS payload speaker:', finalSpeakerId);
-
-    let result = await callTTS(headers, payload);
-    if (result.type === 'audio') {
-      console.log('Direct audio response, size:', result.buffer.length);
-      res.setHeader('Content-Type', result.contentType);
-      return res.status(200).send(result.buffer);
-    }
-
-    let data = result.data;
-    console.log('DupDub response:', JSON.stringify(data).substring(0, 500));
-
-    if (data.data && data.data.resList && data.data.resList[0] && !data.data.resList[0].success) {
-      console.log('DupDub error, retrying in 2s...');
-      await new Promise(r => setTimeout(r, 2000));
-      result = await callTTS(headers, payload);
-      if (result.type === 'audio') {
-        res.setHeader('Content-Type', result.contentType);
-        return res.status(200).send(result.buffer);
-      }
-      data = result.data;
-      if (data.data && data.data.resList && data.data.resList[0] && !data.data.resList[0].success) {
-        return res.status(500).json({ error: 'DupDub server error: ' + data.data.resList[0].message });
-      }
-    }
-
-    if (data.code && data.code !== 200) {
-      return res.status(400).json({ error: 'DupDub error: ' + (data.message || 'Unknown'), code: data.code });
-    }
-
-    function findOssFile(obj, depth) {
-      if (!obj || typeof obj !== 'object' || depth > 5) return null;
-      if (obj.ossFile && typeof obj.ossFile === 'string') return obj.ossFile;
-      for (const key of Object.keys(obj)) {
-        if (typeof obj[key] === 'object') {
-          const found = findOssFile(obj[key], (depth || 0) + 1);
-          if (found) return found;
+    // Step 1: Lookup correct speaker ID by name
+    let speaker = 'uranus_Adam'; // default fallback
+    if (speakerName && speakerName !== 'Adam') {
+      const searchUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=50&language=English';
+      const searchRes = await fetch(searchUrl, {
+        headers: { 'dupdub_token': apiKey, 'Content-Type': 'application/json' }
+      });
+      const searchData = await searchRes.json();
+      if (searchData.code === 200 && searchData.data && searchData.data.results) {
+        const found = searchData.data.results.find(s => s.name && s.name.toLowerCase() === speakerName.toLowerCase());
+        if (found && found.speaker) {
+          speaker = found.speaker;
         }
       }
-      return null;
     }
 
-    const audioUrl = findOssFile(data, 0);
-    console.log('Audio URL:', audioUrl ? audioUrl.substring(0, 100) : 'none');
-    if (!audioUrl) {
-      return res.status(500).json({ error: 'No audio in DupDub response', details: JSON.stringify(data).substring(0, 200) });
+    // Step 2: Generate voice with correct speaker ID
+    const r = await fetch('https://moyin-gateway.dupdub.com/tts/v1/playDemo/dubForSpeaker', {
+      method: 'POST',
+      headers: { 'dupdub_token': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ speaker: speaker, speed: String(speed || 1.0), pitch: String(pitch || 0), textList: [text] })
+    });
+    const ct = r.headers.get('content-type') || '';
+    if (ct.includes('audio') || ct.includes('octet') || ct.includes('wav') || ct.includes('mpeg')) {
+      res.setHeader('Content-Type', ct);
+      const buf = Buffer.from(await r.arrayBuffer());
+      res.send(buf);
+    } else {
+      const data = await r.json();
+      res.status(r.status).json(data);
     }
-
-    const audioRes = await fetch(audioUrl);
-    const audioCt = audioRes.headers.get('content-type') || 'audio/mpeg';
-    const audioBuffer = await audioRes.buffer();
-    console.log('Audio size:', audioBuffer.length, '| Content-Type:', audioCt);
-    if (audioBuffer.length < 100) {
-      return res.status(500).json({ error: 'Audio too small' });
-    }
-    res.setHeader('Content-Type', audioCt.includes('audio') ? audioCt : 'audio/mpeg');
-    res.setHeader('Content-Length', audioBuffer.length);
-    return res.status(200).send(audioBuffer);
-  } catch (err) {
-    console.log('Proxy error:', err.message);
-    res.status(500).json({ error: 'Proxy error: ' + err.message });
+  } catch (e) {
+    res.status(500).json({error: e.message});
   }
 };
