@@ -1,5 +1,14 @@
 const fetch = require('node-fetch');
 
+// Hardcoded speaker IDs from DupDub's actual data-id attributes
+const SPEAKER_MAP = {
+  'spoongy': 'uranus||||c2d38855d8f15bedd8d3881fd6d85647',
+  'sunshine blondie': 'uranus||||e8dea48f91d2325bdab89ac6974f192e',
+  'adam': 'uranus_Adam',
+  'kung master': 'uranus||||57d4e5570cc1cef651cfcbb8c992a26a',
+  'panda warrior': 'uranus||||054c58511d158071e0b4983d68894bd5'
+};
+
 function hasHindi(text) {
   return /[\u0900-\u097F]/.test(text);
 }
@@ -7,7 +16,13 @@ function hasHindi(text) {
 async function findSpeakerId(speakerName, headers) {
   const nameLower = speakerName.toLowerCase().trim();
 
-  // Step 1: Search by keyword (fast, targeted)
+  // Step 0: Check hardcoded map first (most reliable)
+  if (SPEAKER_MAP[nameLower]) {
+    console.log('Found in hardcoded map:', speakerName, '| speaker:', SPEAKER_MAP[nameLower]);
+    return SPEAKER_MAP[nameLower];
+  }
+
+  // Step 1: Search by keyword (for voices not in map)
   try {
     const keyword = encodeURIComponent(speakerName);
     const url = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=20&keyword=' + keyword;
@@ -27,7 +42,7 @@ async function findSpeakerId(speakerName, headers) {
     console.log('Keyword search error:', e.message);
   }
 
-  // Step 2: Search in Animation Videos domain (domainId=3) - for character voices
+  // Step 2: Search in Animation Videos domain (domainId=3)
   try {
     for (let page = 1; page <= 3; page++) {
       const url = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=50&domainId=3&pageNum=' + page;
@@ -49,48 +64,6 @@ async function findSpeakerId(speakerName, headers) {
     }
   } catch (e) {
     console.log('Animation domain search error:', e.message);
-  }
-
-  // Step 3: Search across multiple domains
-  const domainIds = [5, 9, 4, 8, 6, 7, 10, 11, 12, 13, 14, 15, 16, 2];
-  for (const did of domainIds) {
-    try {
-      const url = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=50&domainId=' + did;
-      const res = await fetch(url, { headers });
-      const data = await res.json();
-      if (data.data && data.data.results) {
-        const match = data.data.results.find(s =>
-          s.name && s.name.toLowerCase() === nameLower
-        );
-        if (match) {
-          console.log('Found in domain', did, ':', match.name, '| speaker:', match.speaker);
-          return match.speaker;
-        }
-      }
-    } catch (e) {}
-  }
-
-  // Step 4: Try individual words as keywords
-  const words = speakerName.split(/\s+/);
-  for (const word of words) {
-    if (word.length < 3) continue;
-    try {
-      const url = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=50&keyword=' + encodeURIComponent(word);
-      console.log('Trying word search:', word);
-      const res = await fetch(url, { headers });
-      const data = await res.json();
-      if (data.data && data.data.results) {
-        const match = data.data.results.find(s =>
-          s.name && s.name.toLowerCase() === nameLower
-        );
-        if (match) {
-          console.log('Found via word search:', match.name, '| speaker:', match.speaker);
-          return match.speaker;
-        }
-      }
-    } catch (e) {
-      console.log('Word search error:', e.message);
-    }
   }
 
   return null;
@@ -122,11 +95,13 @@ module.exports = async (req, res) => {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
+
   try {
     const { apiKey, speaker, speed, pitch, textList, text } = req.body;
     if (!apiKey) return res.status(400).json({ error: 'apiKey is required' });
     const finalTextList = textList || (text ? [text] : []);
     if (finalTextList.length === 0) return res.status(400).json({ error: 'text is required' });
+
     const headers = { 'dupdub_token': apiKey, 'Content-Type': 'application/json' };
     const speakerName = (speaker || '').trim();
     console.log('Speaker from frontend:', speakerName);
@@ -172,6 +147,7 @@ module.exports = async (req, res) => {
       res.setHeader('Content-Type', result.contentType);
       return res.status(200).send(result.buffer);
     }
+
     let data = result.data;
     console.log('DupDub response:', JSON.stringify(data).substring(0, 500));
 
@@ -207,7 +183,6 @@ module.exports = async (req, res) => {
 
     const audioUrl = findOssFile(data, 0);
     console.log('Audio URL:', audioUrl ? audioUrl.substring(0, 100) : 'none');
-
     if (!audioUrl) {
       return res.status(500).json({ error: 'No audio in DupDub response', details: JSON.stringify(data).substring(0, 200) });
     }
@@ -216,11 +191,9 @@ module.exports = async (req, res) => {
     const audioCt = audioRes.headers.get('content-type') || 'audio/mpeg';
     const audioBuffer = await audioRes.buffer();
     console.log('Audio size:', audioBuffer.length, '| Content-Type:', audioCt);
-
     if (audioBuffer.length < 100) {
       return res.status(500).json({ error: 'Audio too small' });
     }
-
     res.setHeader('Content-Type', audioCt.includes('audio') ? audioCt : 'audio/mpeg');
     res.setHeader('Content-Length', audioBuffer.length);
     return res.status(200).send(audioBuffer);
