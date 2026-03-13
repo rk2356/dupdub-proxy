@@ -15,14 +15,10 @@ function hasHindi(text) {
 
 async function findSpeakerId(speakerName, headers) {
   const nameLower = speakerName.toLowerCase().trim();
-
-  // Step 0: Check hardcoded map first (most reliable)
   if (SPEAKER_MAP[nameLower]) {
     console.log('Found in hardcoded map:', speakerName, '| speaker:', SPEAKER_MAP[nameLower]);
     return SPEAKER_MAP[nameLower];
   }
-
-  // Step 1: Search by keyword (for voices not in map)
   try {
     const keyword = encodeURIComponent(speakerName);
     const url = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=20&keyword=' + keyword;
@@ -30,9 +26,7 @@ async function findSpeakerId(speakerName, headers) {
     const res = await fetch(url, { headers });
     const data = await res.json();
     if (data.data && data.data.results && data.data.results.length > 0) {
-      const exact = data.data.results.find(s =>
-        s.name && s.name.toLowerCase() === nameLower
-      );
+      const exact = data.data.results.find(s => s.name && s.name.toLowerCase() === nameLower);
       if (exact) {
         console.log('Found exact match:', exact.name, '| speaker:', exact.speaker);
         return exact.speaker;
@@ -41,31 +35,6 @@ async function findSpeakerId(speakerName, headers) {
   } catch (e) {
     console.log('Keyword search error:', e.message);
   }
-
-  // Step 2: Search in Animation Videos domain (domainId=3)
-  try {
-    for (let page = 1; page <= 3; page++) {
-      const url = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=50&domainId=3&pageNum=' + page;
-      console.log('Searching Animation Videos page', page, 'for:', speakerName);
-      const res = await fetch(url, { headers });
-      const data = await res.json();
-      if (data.data && data.data.results) {
-        const match = data.data.results.find(s =>
-          s.name && s.name.toLowerCase() === nameLower
-        );
-        if (match) {
-          console.log('Found in Animation domain:', match.name, '| speaker:', match.speaker);
-          return match.speaker;
-        }
-        if (data.data.results.length < 50) break;
-      } else {
-        break;
-      }
-    }
-  } catch (e) {
-    console.log('Animation domain search error:', e.message);
-  }
-
   return null;
 }
 
@@ -97,7 +66,7 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const { apiKey, speaker, speed, pitch, textList, text } = req.body;
+    const { apiKey, speaker, speakerId, speed, pitch, textList, text } = req.body;
     if (!apiKey) return res.status(400).json({ error: 'apiKey is required' });
     const finalTextList = textList || (text ? [text] : []);
     if (finalTextList.length === 0) return res.status(400).json({ error: 'text is required' });
@@ -105,13 +74,19 @@ module.exports = async (req, res) => {
     const headers = { 'dupdub_token': apiKey, 'Content-Type': 'application/json' };
     const speakerName = (speaker || '').trim();
     console.log('Speaker from frontend:', speakerName);
+    console.log('SpeakerId from frontend:', speakerId || 'none');
 
-    let speakerId = null;
-    if (speakerName) {
-      speakerId = await findSpeakerId(speakerName, headers);
+    // PRIORITY: Use speakerId directly if provided from frontend
+    let finalSpeakerId = null;
+    if (speakerId && speakerId.trim()) {
+      finalSpeakerId = speakerId.trim();
+      console.log('Using direct speakerId from frontend:', finalSpeakerId);
+    } else if (speakerName) {
+      finalSpeakerId = await findSpeakerId(speakerName, headers);
+      console.log('Resolved speaker name to ID:', finalSpeakerId);
     }
 
-    if (!speakerId) {
+    if (!finalSpeakerId) {
       const allText = finalTextList.join(' ');
       const lang = hasHindi(allText) ? 'Hindi' : 'English';
       console.log('No match for "' + speakerName + '". Getting first', lang, 'speaker...');
@@ -120,26 +95,26 @@ module.exports = async (req, res) => {
         const res2 = await fetch(url, { headers });
         const data2 = await res2.json();
         if (data2.data && data2.data.results && data2.data.results.length > 0) {
-          speakerId = data2.data.results[0].speaker;
-          console.log('Using fallback speaker:', speakerId);
+          finalSpeakerId = data2.data.results[0].speaker;
+          console.log('Using fallback speaker:', finalSpeakerId);
         }
       } catch (e) {
         console.log('Fallback error:', e.message);
       }
     }
 
-    if (!speakerId) {
+    if (!finalSpeakerId) {
       return res.status(400).json({ error: 'Could not find any speaker for: ' + speakerName });
     }
 
     const payload = {
-      speaker: speakerId,
+      speaker: finalSpeakerId,
       speed: speed || 1.0,
       pitch: pitch || 0,
       textList: finalTextList,
       source: 'web'
     };
-    console.log('TTS payload speaker:', speakerId);
+    console.log('TTS payload speaker:', finalSpeakerId);
 
     let result = await callTTS(headers, payload);
     if (result.type === 'audio') {
