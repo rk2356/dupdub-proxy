@@ -4,14 +4,61 @@ function hasHindi(text) {
   return /[\u0900-\u097F]/.test(text);
 }
 
-// Hardcoded speaker IDs for guaranteed correct voice matching
-const SPEAKER_MAP = {
-  'spoongy': 'uranus||||c2d38855d8f15bedd8d3881fd6d85647',
-    'sunshine blondie': null, // Will be resolved via search
-  'adam': 'uranus_Adam',
-  'panda warrior': 'uranus||||054c58511d158071e0b4983d68894bd5',
-  'kung master': null // Will be resolved via search
-};
+async function findSpeakerId(speakerName, headers) {
+  // Step 1: Search by keyword (fast, targeted)
+  try {
+    const keyword = encodeURIComponent(speakerName);
+    const url = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=20&keyword=' + keyword;
+    console.log('Searching speaker by keyword:', speakerName);
+    const res = await fetch(url, { headers });
+    const data = await res.json();
+    if (data.data && data.data.results && data.data.results.length > 0) {
+      // Exact name match first
+      const exact = data.data.results.find(s =>
+        s.name && s.name.toLowerCase() === speakerName.toLowerCase()
+      );
+      if (exact) {
+        console.log('Found exact match:', exact.name, '| speaker:', exact.speaker);
+        return exact.speaker;
+      }
+      // Partial match fallback
+      const partial = data.data.results.find(s =>
+        s.name && s.name.toLowerCase().includes(speakerName.toLowerCase())
+      );
+      if (partial) {
+        console.log('Found partial match:', partial.name, '| speaker:', partial.speaker);
+        return partial.speaker;
+      }
+    }
+  } catch (e) {
+    console.log('Keyword search error:', e.message);
+  }
+
+  // Step 2: Try individual words as keywords
+  const words = speakerName.split(/\s+/);
+  for (const word of words) {
+    if (word.length < 3) continue;
+    try {
+      const url = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=50&keyword=' + encodeURIComponent(word);
+      console.log('Trying word search:', word);
+      const res = await fetch(url, { headers });
+      const data = await res.json();
+      if (data.data && data.data.results) {
+        const match = data.data.results.find(s =>
+          s.name && s.name.toLowerCase() === speakerName.toLowerCase()
+        );
+        if (match) {
+          console.log('Found via word search:', match.name, '| speaker:', match.speaker);
+          return match.speaker;
+        }
+      }
+    } catch (e) {
+      console.log('Word search error:', e.message);
+    }
+  }
+
+  return null;
+}
 
 async function callTTS(headers, payload) {
   const r = await fetch('https://moyin-gateway.dupdub.com/tts/v1/playDemo/dubForSpeaker', {
@@ -49,54 +96,30 @@ module.exports = async (req, res) => {
     if (finalTextList.length === 0) return res.status(400).json({ error: 'text is required' });
 
     const headers = { 'dupdub_token': apiKey, 'Content-Type': 'application/json' };
-    const allText = finalTextList.join(' ');
-    const isHindi = hasHindi(allText);
-    const lang = isHindi ? 'Hindi' : 'English';
     const speakerName = (speaker || '').trim();
-    console.log('Speaker from frontend:', speakerName, '| Language:', lang);
+    console.log('Speaker from frontend:', speakerName);
 
-    // Step 1: Check hardcoded map first
-    let speakerId = SPEAKER_MAP[speakerName.toLowerCase()] || null;
-    if (speakerId) {
-      console.log('Using hardcoded speaker ID:', speakerId);
+    // Find speaker ID using keyword search
+    let speakerId = null;
+    if (speakerName) {
+      speakerId = await findSpeakerId(speakerName, headers);
     }
 
-    // Step 2: If not in map, search DupDub API
-    if (!speakerId && speakerName) {
-      try {
-        const broadUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?pageSize=800';
-        const broadRes = await fetch(broadUrl, { headers });
-        const broadData = await broadRes.json();
-        const totalResults = broadData.data && broadData.data.results ? broadData.data.results.length : 0;
-        console.log('Broad search results:', totalResults);
-
-        if (broadData.data && broadData.data.results && broadData.data.results.length > 0) {
-          const match = broadData.data.results.find(s =>
-            s.name && s.name.toLowerCase() === speakerName.toLowerCase()
-          );
-          if (match) {
-            speakerId = match.speaker;
-            console.log('Found exact match:', match.name, '| Full speaker ID:', speakerId);
-          }
-        }
-      } catch (e) {
-        console.log('Broad search error:', e.message);
-      }
-    }
-
-    // Step 3: Fallback to first speaker for language
+    // Fallback: get first available speaker for language
     if (!speakerId) {
+      const allText = finalTextList.join(' ');
+      const lang = hasHindi(allText) ? 'Hindi' : 'English';
       console.log('No match for "' + speakerName + '". Getting first', lang, 'speaker...');
       try {
-        const fallbackUrl = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=' + lang;
-        const fallbackRes = await fetch(fallbackUrl, { headers });
-        const fallbackData = await fallbackRes.json();
-        if (fallbackData.data && fallbackData.data.results && fallbackData.data.results.length > 0) {
-          speakerId = fallbackData.data.results[0].speaker;
-          console.log('Using first available:', speakerId);
+        const url = 'https://moyin-gateway.dupdub.com/tts/v1/storeSpeakerV2/searchSpeakerList?language=' + lang;
+        const res2 = await fetch(url, { headers });
+        const data2 = await res2.json();
+        if (data2.data && data2.data.results && data2.data.results.length > 0) {
+          speakerId = data2.data.results[0].speaker;
+          console.log('Using fallback speaker:', speakerId);
         }
       } catch (e) {
-        console.log('Fallback search error:', e.message);
+        console.log('Fallback error:', e.message);
       }
     }
 
@@ -125,23 +148,18 @@ module.exports = async (req, res) => {
     let data = result.data;
     console.log('DupDub response:', JSON.stringify(data).substring(0, 500));
 
-    // Check for DupDub server error (code 3009) and retry once
+    // Retry on DupDub server error
     if (data.data && data.data.resList && data.data.resList[0] && !data.data.resList[0].success) {
-      const errCode = data.data.resList[0].code;
-      const errMsg = data.data.resList[0].message;
-      console.log('DupDub TTS error code:', errCode, '| message:', errMsg, '| Retrying...');
+      console.log('DupDub error, retrying in 2s...');
       await new Promise(r => setTimeout(r, 2000));
       result = await callTTS(headers, payload);
       if (result.type === 'audio') {
-        console.log('Retry: Direct audio response, size:', result.buffer.length);
         res.setHeader('Content-Type', result.contentType);
         return res.status(200).send(result.buffer);
       }
       data = result.data;
-      console.log('Retry DupDub response:', JSON.stringify(data).substring(0, 500));
-      // Check if retry also failed
       if (data.data && data.data.resList && data.data.resList[0] && !data.data.resList[0].success) {
-        return res.status(500).json({ error: 'DupDub server error (code ' + data.data.resList[0].code + '): ' + data.data.resList[0].message });
+        return res.status(500).json({ error: 'DupDub server error: ' + data.data.resList[0].message });
       }
     }
 
@@ -149,14 +167,13 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: 'DupDub error: ' + (data.message || 'Unknown'), code: data.code });
     }
 
-    // Find audio URL - ONLY look for ossFile (actual audio), NOT duration_address (JSON metadata)
+    // Find audio URL - only ossFile
     function findOssFile(obj, depth) {
       if (!obj || typeof obj !== 'object' || depth > 5) return null;
-      if (obj.ossFile && typeof obj.ossFile === 'string' && obj.ossFile.includes('.wav')) return obj.ossFile;
       if (obj.ossFile && typeof obj.ossFile === 'string') return obj.ossFile;
       for (const key of Object.keys(obj)) {
         if (typeof obj[key] === 'object') {
-          const found = findOssFile(obj[key], (depth||0)+1);
+          const found = findOssFile(obj[key], (depth || 0) + 1);
           if (found) return found;
         }
       }
@@ -182,6 +199,7 @@ module.exports = async (req, res) => {
     res.setHeader('Content-Type', audioCt.includes('audio') ? audioCt : 'audio/mpeg');
     res.setHeader('Content-Length', audioBuffer.length);
     return res.status(200).send(audioBuffer);
+
   } catch (err) {
     console.log('Proxy error:', err.message);
     res.status(500).json({ error: 'Proxy error: ' + err.message });
